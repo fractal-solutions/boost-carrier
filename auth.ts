@@ -1,4 +1,4 @@
-const TOKEN_URL = "https://login.uber.com/oauth/v2/token";
+const DEFAULT_TOKEN_URL = "https://login.uber.com/oauth/v2/token";
 const TOKEN_SCOPE = "eats.deliveries direct.organizations";
 
 type TokenResponse = {
@@ -43,7 +43,8 @@ async function requestToken(): Promise<string> {
     scope: TOKEN_SCOPE,
   });
 
-  const response = await fetch(TOKEN_URL, {
+  const tokenUrl = process.env.UBER_TOKEN_URL || DEFAULT_TOKEN_URL;
+  const response = await fetch(tokenUrl, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form,

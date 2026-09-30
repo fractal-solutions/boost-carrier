@@ -97,6 +97,39 @@ The examples below use port `5000`; to match them, set `PORT=5000` in `.env`. Ot
 bun test
 ```
 
+## Interactive Demo (local end-to-end)
+
+Want to watch a full order work without a real Uber account? The demo runs this service against the `uber-delivery-mock-api` project, places a real delivery, and live-tails the order as status changes and signed webhooks flow through.
+
+Prerequisites:
+
+- Bun (already required above).
+- Python 3.10+ with the mock API's dependencies installed.
+- The `uber-delivery-mock-api` repository checked out as a sibling of this project (`../uber-delivery-mock-api`).
+
+```powershell
+# once, in the mock API project
+pip install -r ..\uber-delivery-mock-api\requirements.txt
+```
+
+Then, from this project directory:
+
+```powershell
+bun demo
+```
+
+The menu lets you place a live order end-to-end, request a quote only, look up a delivery by id, or send a signed test webhook. Placing an order walks through health, quote, and booking, then prints every status transition and every signed webhook the mock sends to `/webhook/uber` (which this service verifies and forwards to the demo's receiver).
+
+To run one full order and exit (handy for a quick check):
+
+```powershell
+bun demo/order-demo.ts --auto
+```
+
+The demo is self-contained: it starts its own mock API, this service, and a webhook receiver on ports `3200`, `5200`, and `9299`, using the mock's test credentials and with address validation disabled. It does not read or modify `.env`, so your real Uber credentials are untouched. Override the mock location or interpreter with the `MOCK_API_DIR` and `PYTHON` environment variables.
+
+The same mock is used by the automated integration test (`test/integration.test.js`), which `bun test` runs alongside the unit tests.
+
 ## Ecommerce Delivery Flow
 
 Here is the order from start to finish:

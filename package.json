@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun --watch server.ts",
     "start": "bun server.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "demo": "bun demo/order-demo.ts"
   }
 }
