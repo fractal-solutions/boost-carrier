@@ -8,7 +8,13 @@ This is an API adapter, not a complete order-management system. It does not stor
 
 ### Selecting Accurate Pickup and Drop-off Locations
 
-This service does **not** search Uber for places or provide an Uber location picker. Your ecommerce application supplies the pickup and drop-off addresses. Uber Direct's quote request checks the supplied route and returns a quote when it can service it; it does not return a list of address/place suggestions for a customer to choose from. A successful quote is the serviceability check, not an address-autocomplete result.
+This service does **not** provide a customer-facing location picker. Your ecommerce application supplies the pickup and drop-off addresses. Uber Direct's quote request checks the supplied route and returns a quote when it can service it; it does not return a list of address/place suggestions for a customer to choose from. A successful quote is the serviceability check, not an address-autocomplete result.
+
+The quote endpoint verifies the drop-off against Komoot's public Photon geocoder before sending the quote request to Uber. It is enabled by default and needs no API key or geocoder URL. Set `ADDRESS_VALIDATION_ENABLED=false` to turn it off. The check requires a mapped street match and, when the submitted street starts with a house number, the same house number in the result. Unmatched addresses are rejected with `422`; if Photon is unavailable, the quote is rejected with `503` rather than sent to Uber. A map match improves address accuracy but does not guarantee Uber can serve the route; Uber's quote is still required.
+
+Photon's public demo is free for reasonable request volumes, but has no availability guarantee and may throttle or block extensive usage. This service makes one geocoding request per quote. The full drop-off address is sent from your server to `https://photon.komoot.io`; account for that third-party processing in your privacy disclosures. For higher-volume or guaranteed availability, host Photon yourself and set `ADDRESS_VALIDATION_BASE_URL` to that endpoint. This setting is optional; it is an override, not a required setup URL. `ADDRESS_VALIDATION_COUNTRY_CODES` can restrict results, for example `ke`.
+
+The Bun API still listens on its single `PORT` (default `3000`). The optional geocoder URL is only used for server-to-server requests; customers do not need a second port.
 
 #### Checkout Address Picker Setup
 
@@ -50,6 +56,10 @@ Bun automatically loads a local `.env` file. Keep `.env` private and do not comm
 | `UBER_CUSTOMER_ID` | Merchant/customer ID used in every Uber API URL and local API route | `PENDING_MERCHANT_ID_PLACEHOLDER` |
 | `UBER_API_BASE_URL` | Uber API environment | `https://api.sandbox.uber.com` |
 | `PORT` | Local HTTP port | `3000` |
+| `ADDRESS_VALIDATION_ENABLED` | Require a map match before requesting an Uber quote | `true` |
+| `ADDRESS_VALIDATION_BASE_URL` | Optional Photon-compatible geocoder endpoint override | `https://photon.komoot.io/api/` |
+| `ADDRESS_VALIDATION_USER_AGENT` | Identifies this service in geocoder requests | `boost-carrier/1.0` |
+| `ADDRESS_VALIDATION_COUNTRY_CODES` | Optional comma-separated country codes to limit Photon results | Empty |
 
 The customer ID is required by the existing Odoo implementation as well: its API URLs are built under `/customers/{customer_id}/...`. Once Uber provides the real ID, set it in `.env` and use the same value in the request path to this service. A mismatched ID gets a local `404`.
 

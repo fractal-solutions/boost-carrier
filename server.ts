@@ -6,6 +6,7 @@ import {
   type DeliveryInput,
   type DeliveryQuoteInput,
 } from "./delivery";
+import { AddressValidationError, validateDropoffAddress } from "./address_validation";
 
 const customerId = process.env.UBER_CUSTOMER_ID || "PENDING_MERCHANT_ID_PLACEHOLDER";
 
@@ -71,6 +72,9 @@ function logWebhook(payload: Record<string, unknown>): void {
 
 function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) return json({ error: error.message }, error.status);
+  if (error instanceof AddressValidationError) {
+    return json({ error: error.message }, error.status);
+  }
   if (error instanceof UberApiError) {
     return json({ error: error.message, details: error.details }, error.status);
   }
@@ -104,6 +108,7 @@ export const server = Bun.serve({
 
       if (parts.length === 4 && parts[3] === "delivery_quotes" && request.method === "POST") {
         const input = validateQuoteInput(await readJson(request));
+        await validateDropoffAddress(input.dropoff_address);
         const quote = await createDeliveryQuote(parts[2], input);
         return json({
           ...quote,
