@@ -1,31 +1,39 @@
-# Uber Direct Delivery Service
+# Uber Delivery Connection
 
-A Bun HTTP service for connecting an ecommerce application to Uber Direct. The implemented flow is: request a delivery quote, book a delivery with that quote, then fetch its latest status and courier details. Uber webhooks are accepted and logged. The service uses Bun's built-in `fetch` and `Bun.serve`; it has no runtime package dependencies.
+This service connects your online store to Uber Direct. It can check a delivery address, ask Uber for a price, book a courier, look up the delivery later, and pass Uber's automatic updates to your store.
 
-## Read This Before Going Live
+It is a small backend service, not a checkout page or order-management system. It does not save your orders or delivery history. Your store still needs to save the IDs and delivery updates it receives.
 
-This is an API adapter, not a complete order-management system. It does not store orders, delivery status history, or webhook events. Your ecommerce application should store the delivery ID returned by booking and call the status endpoint when it needs fresh status/location. Webhook events currently go to the server console only; they are not saved or forwarded to your ecommerce application.
+### Three Useful Terms
+
+- **Quote:** Uber's estimated delivery price and a check that it can serve the route. No courier is booked yet.
+- **Book a delivery:** Place the actual courier order with Uber. This may incur a delivery charge.
+- **Webhook:** An automatic message Uber sends when something changes, such as delivery status or courier location. This service checks that the message came from Uber and forwards it to your store.
+
+## Before You Start
+
+You need Bun installed, an Uber Direct account with API access approved, and your store's backend to receive delivery updates. The approval matters: this project previously received an Uber `401 unauthorized_client` response. In plain English, Uber had not authorized the app to use its API. Real quotes and bookings will not work until Uber approves the app and provides working credentials.
+
+This service does not save your orders, quote IDs, delivery IDs, or delivery history. Save the quote and delivery IDs in your store's order record. To get automatic updates, configure the webhook as described below and give this service the URL of your store's update endpoint. Your store must save and apply each update.
 
 ### Selecting Accurate Pickup and Drop-off Locations
 
-This service does **not** provide a customer-facing location picker. Your ecommerce application supplies the pickup and drop-off addresses. Uber Direct's quote request checks the supplied route and returns a quote when it can service it; it does not return a list of address/place suggestions for a customer to choose from. A successful quote is the serviceability check, not an address-autocomplete result.
+Your checkout page must collect the pickup and drop-off addresses and send them to this service. This service does not show a map or address picker.
 
-The quote endpoint verifies the drop-off against Komoot's public Photon geocoder before sending the quote request to Uber. It is enabled by default and needs no API key or geocoder URL. Set `ADDRESS_VALIDATION_ENABLED=false` to turn it off. The check requires a mapped street match and, when the submitted street starts with a house number, the same house number in the result. Unmatched addresses are rejected with `422`; if Photon is unavailable, the quote is rejected with `503` rather than sent to Uber. A map match improves address accuracy but does not guarantee Uber can serve the route; Uber's quote is still required.
+Before asking Uber for a price, the service checks the drop-off address against Photon, a public map search service. This is on by default and does not need an API key. It checks that the street, and house number when supplied, appear on the map. Uber then separately checks whether it can deliver on that route. A map match does not guarantee Uber can serve the address.
 
-Photon's public demo is free for reasonable request volumes, but has no availability guarantee and may throttle or block extensive usage. This service makes one geocoding request per quote. The full drop-off address is sent from your server to `https://photon.komoot.io`; account for that third-party processing in your privacy disclosures. For higher-volume or guaranteed availability, host Photon yourself and set `ADDRESS_VALIDATION_BASE_URL` to that endpoint. This setting is optional; it is an override, not a required setup URL. `ADDRESS_VALIDATION_COUNTRY_CODES` can restrict results, for example `ke`.
-
-The Bun API still listens on its single `PORT` (default `3000`). The optional geocoder URL is only used for server-to-server requests; customers do not need a second port.
+Photon's public service is free for reasonable use, but it can be busy, throttle requests, or be unavailable. One address lookup is made for each quote, and the full drop-off address is sent to Photon. If Photon is unavailable, the service stops and returns an error instead of sending the quote request to Uber. Set `ADDRESS_VALIDATION_ENABLED=false` to skip the map check. `ADDRESS_VALIDATION_COUNTRY_CODES=ke` can limit searches to Kenya, for example. The optional `ADDRESS_VALIDATION_BASE_URL` setting is only needed if you host your own compatible map search service; you do not need to fill it in for the default setup.
 
 #### Checkout Address Picker Setup
 
-Implement the picker in your ecommerce checkout with a provider such as Google Places Autocomplete or Mapbox Search JS. The picker belongs in the customer-facing ecommerce app; this Bun service does not render a map or call a mapping provider.
+If you want suggestions as a customer types, add an address picker to your checkout. That is a separate part of your store; it is not included in this backend. Whatever picker you use, still send the chosen address here for a quote.
 
-1. Restrict autocomplete to the countries and service area where you deliver. Bias results around the delivery region, but do not treat that bias as proof Uber serves the address.
-2. Require the customer to select an autocomplete result or confirm a dropped pin. Do not submit arbitrary, unselected text as a verified location.
-3. From the selected result, save the provider place/feature ID for your own records, its canonical formatted address, and its latitude/longitude. Ask for apartment, suite, floor, gate, or delivery instructions separately; append street/unit details to the address where appropriate.
-4. For pickup, maintain an admin-verified list of store/warehouse locations, each with its canonical address, coordinates, and courier instructions. At checkout choose the fulfillment location for the order from this list; do not ask the buyer to type the pickup address.
-5. Convert the selected address into Uber's structured address shape and call this service's quote endpoint. Only present the Uber option if the quote succeeds. If Uber reports an undeliverable address/route, ask the buyer to correct the drop-off or choose another delivery method.
-6. Send the exact same pickup and drop-off addresses with the quote ID when booking. Store the selected provider ID and coordinates alongside your order so your support team can verify what the customer selected.
+1. Limit suggestions to the countries and areas where you deliver. Showing nearby suggestions does not prove Uber can deliver there.
+2. Ask the customer to choose a suggestion or confirm a map pin. Typing an address alone does not prove it is correct.
+3. Save the chosen address and coordinates in your store. Collect apartment, floor, gate, and delivery instructions separately.
+4. Choose the pickup address from your own approved store or warehouse list. The customer should not have to enter it.
+5. Ask this service for a quote. Show Uber delivery only if the request succeeds. If it fails, ask the customer to correct the address or choose another delivery option.
+6. Use the same pickup and drop-off addresses when booking. Save the quote ID and delivery ID with the order.
 
 Example normalized address object sent to this service:
 
@@ -39,47 +47,51 @@ Example normalized address object sent to this service:
 }
 ```
 
-The service serializes this object as the address string Uber Direct expects. It currently explicitly accepts pickup latitude/longitude on quote requests. Although extra fields are forwarded, this integration has not verified Uber's accepted drop-off coordinate fields; treat selected drop-off coordinates as your own stored data until confirmed against your Uber Direct account/API reference. An autocomplete result improves address selection but does not guarantee Uber coverage; the quote response is the serviceability check.
+The fields describe a street address that this service sends to Uber. Pickup coordinates are also accepted in quote requests. Drop-off coordinates are not currently sent in a verified Uber format, so this service checks the drop-off text address instead. Address suggestions help customers choose correctly; the quote result tells you whether Uber can serve the route.
 
-The API routes currently have no app authentication or rate limiting. The webhook has no signature verification. Do not expose this server publicly until it is behind your authentication/network controls and the webhook is verified. Delivery cancellation, delivery updates, refunds, and persistent event delivery are not implemented.
+The quote, booking, and status routes do not have a login or traffic limit built in. Put them behind your store's login/security controls before making them public. The webhook is different: it checks a secret signature from Uber. This service forwards webhook messages but does not save them. Cancelling deliveries, changing delivery details, and refunds are not supported here.
 
-The live OAuth check made during setup returned `401 unauthorized_client`, even with the requested `eats.deliveries` scope. Therefore, this is **not yet plug-and-play**: adding the customer ID alone will not be enough until Uber accepts the client credentials and grants the app the required access. Confirm the Uber Direct app is enabled/approved for the client-credentials grant and required scope, then test OAuth again.
+**Uber access may need setup first.** A previous connection attempt returned `401 unauthorized_client`, which means Uber did not accept the app credentials. Ask Uber to approve API access for your account and confirm the credentials and permissions they provide. Adding the customer ID alone will not fix this login error.
 
 ## Configuration
 
-Bun automatically loads a local `.env` file. Keep `.env` private and do not commit it. The repository's `.gitignore` excludes it.
+Bun reads settings from a local `.env` file when the service starts. Keep that file private; it contains your Uber password-like keys and webhook secret. Do not commit it. Start from `.env.example` and fill in the required values.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `UBER_CLIENT_ID` | Uber OAuth client ID | Required |
-| `UBER_CLIENT_SECRET` | Uber OAuth client secret | Required |
-| `UBER_CUSTOMER_ID` | Merchant/customer ID used in every Uber API URL and local API route | `PENDING_MERCHANT_ID_PLACEHOLDER` |
-| `UBER_API_BASE_URL` | Uber API environment | `https://api.sandbox.uber.com` |
-| `PORT` | Local HTTP port | `3000` |
-| `ADDRESS_VALIDATION_ENABLED` | Require a map match before requesting an Uber quote | `true` |
-| `ADDRESS_VALIDATION_BASE_URL` | Optional Photon-compatible geocoder endpoint override | `https://photon.komoot.io/api/` |
-| `ADDRESS_VALIDATION_USER_AGENT` | Identifies this service in geocoder requests | `boost-carrier/1.0` |
-| `ADDRESS_VALIDATION_COUNTRY_CODES` | Optional comma-separated country codes to limit Photon results | Empty |
+| Setting | What it means | What to enter |
+| --- | --- | --- |
+| `UBER_CLIENT_ID` | Your app's ID from Uber | Required |
+| `UBER_CLIENT_SECRET` | Your app's private key from Uber | Required; keep secret |
+| `UBER_CUSTOMER_ID` | Your Uber Direct account/customer ID | Replace the placeholder with the ID Uber gives you |
+| `UBER_API_BASE_URL` | Which Uber environment to call | Sandbox by default; use production only when approved |
+| `PORT` | Port this service listens on | `3000` by default |
+| `UBER_WEBHOOK_SIGNING_KEY` | Secret Uber uses to sign webhook messages | Copy from the webhook you create in the Uber Direct dashboard |
+| `DELIVERY_WEBHOOK_FORWARD_URL` | Your store's endpoint for receiving delivery updates | Required for forwarding updates |
+| `ADDRESS_VALIDATION_ENABLED` | Check drop-off addresses against the map before asking Uber for a quote | `true` by default; set to `false` to turn off |
+| `ADDRESS_VALIDATION_BASE_URL` | Optional replacement for the default map search service | Leave empty for the default Photon service |
+| `ADDRESS_VALIDATION_USER_AGENT` | Name sent with map searches | `boost-carrier/1.0` by default |
+| `ADDRESS_VALIDATION_COUNTRY_CODES` | Limit address checks to certain countries | Optional; use two-letter country codes such as `ke` |
 
-The customer ID is required by the existing Odoo implementation as well: its API URLs are built under `/customers/{customer_id}/...`. Once Uber provides the real ID, set it in `.env` and use the same value in the request path to this service. A mismatched ID gets a local `404`.
+Use the same Uber customer ID in the request URL and in `.env`. If they do not match, this service returns `404` (not found).
 
-Uber's OAuth token endpoint is `https://login.uber.com/oauth/v2/token`. The service requests a `client_credentials` token with the `eats.deliveries direct.organizations` scopes used by the Odoo implementation and caches the token until shortly before expiry.
+You do not need to request an Uber login token yourself. The service logs in using your app ID and private key. If Uber rejects those keys, ask Uber to confirm that API access is approved for your account.
 
 ## Start and Test
 
-From the project directory:
+Install Bun first, then open a terminal in this project directory. Add your Uber settings to `.env`, then start the service:
 
 ```powershell
 bun run server.ts
 ```
 
-For development with reload:
+During development, use this command to restart the service automatically when files change:
 
 ```powershell
 bun run dev
 ```
 
-Set `PORT=5000` in `.env` to listen on port 5000. The server prints its listening URL at startup. Run the local tests with:
+The examples below use port `5000`; to match them, set `PORT=5000` in `.env`. Otherwise change the example URLs to the port printed when the service starts. Run the tests with:
 
 ```powershell
 bun test
@@ -87,13 +99,19 @@ bun test
 
 ## Ecommerce Delivery Flow
 
-Use the same customer ID and selected pickup/drop-off addresses for the quote and booking. Address objects are serialized to JSON strings for Uber Direct; structured fields should include street, city, region/postal code when applicable, and country.
+Here is the order from start to finish:
 
-The primary integration examples below are JavaScript and `curl`. The lifecycle is: check service health, request a quote, book after order confirmation, persist the returned delivery ID, then fetch current status/location as needed. Configure Uber to send webhooks to `https://YOUR_HOST/webhook/uber`; this handler currently logs and acknowledges events but does not store or forward them. An optional PowerShell version follows the JavaScript and `curl` examples.
+1. Your store sends the pickup and customer addresses to this service and asks Uber for a quote.
+2. Show the delivery option and price only if the quote works.
+3. After the customer places the order, send the quote ID and same addresses to book the courier.
+4. Save the delivery ID with the order. Uber uses it to identify this delivery.
+5. Uber sends status and courier-location updates to `/webhook/uber`. This service checks that the message really came from Uber and passes it to your store's `DELIVERY_WEBHOOK_FORWARD_URL` endpoint.
+
+Your store's endpoint must save each update and mark the order accordingly. It should accept duplicate updates safely. The examples below show how to call every route. The optional PowerShell examples follow JavaScript and `curl`.
 
 ## JavaScript Examples
 
-These examples use native `fetch` and work in Bun or modern Node.js. Run them on your ecommerce backend, not in browser code. Your ecommerce frontend should call your own authenticated application API; never expose Uber credentials or this unauthenticated service directly to browsers.
+These examples use `fetch`, which is built into Bun and modern Node.js. Run them on your server, not in the customer's browser. Your checkout should call your own store backend; keep Uber keys private and do not expose this service's unprotected quote and booking routes to the public internet.
 
 Replace the customer ID and example addresses/contact details with your approved merchant and order data. These snippets share the setup below; run the relevant action block after setup. Run the quote before booking. **The booking example creates a real Uber delivery** in the configured Uber environment, so run it only after order confirmation and use sandbox while testing.
 
@@ -211,32 +229,39 @@ console.log("Courier location:", current.courier?.location ?? "Not available yet
 
 The service does not store status history. Call this endpoint again when you need a fresh snapshot; the tracking URL can also be shown to the customer.
 
-### 5. Test Webhook Acknowledgement
+### 5. Configure and Test Webhook Forwarding
 
-For production, configure Uber Direct to POST real events to `https://YOUR_HOST/webhook/uber`; your ecommerce app does not send those events. This local example sends a **fake test event**. The route only logs and acknowledges it; it does not update an order database, verify Uber's signature, or forward the event elsewhere.
+For production, configure Uber Direct to POST `event.delivery_status` and `event.courier_update` events to `https://YOUR_HOST/webhook/uber`. The service verifies the HMAC signature, then forwards the unchanged JSON body and `X-Uber-Signature` header to `DELIVERY_WEBHOOK_FORWARD_URL`. Your ecommerce endpoint should persist the event, update the order associated with `delivery_id`, and return a `2xx` only after it has accepted the event. Use HTTPS for both public and production callback URLs.
+
+The following sends a **fake test event** signed with the configured key. Point `DELIVERY_WEBHOOK_FORWARD_URL` at a test receiver before running it; otherwise the test event could update a real order. The receiving endpoint must handle duplicates because Uber may retry failed webhook deliveries.
 
 ```js
-const webhookResponse = await fetch("http://localhost:5000/webhook/uber", {
+import { createHmac } from "node:crypto";
+
+const webhookSigningKey = process.env.UBER_WEBHOOK_SIGNING_KEY;
+if (!webhookSigningKey) throw new Error("Set UBER_WEBHOOK_SIGNING_KEY first.");
+
+const webhookPayload = JSON.stringify({
+	delivery_id: "TEST-DELIVERY-ID",
+	kind: "event.delivery_status",
+	data: { status: "pickup" },
+});
+const webhookSignature = createHmac("sha256", webhookSigningKey)
+	.update(webhookPayload, "utf8")
+	.digest("hex");
+
+const webhookResponse = await fetch(`${service}/webhook/uber`, {
 	method: "POST",
-	headers: { "Content-Type": "application/json" },
-	body: JSON.stringify({
-		delivery_id: "DELIVERY_ID_FROM_UBER",
-		kind: "event.delivery_status",
-		data: {
-			status: "pickup",
-			courier_imminent: false,
-			tracking_url: "https://example.test/track",
-			courier: {
-				name: "Test Courier",
-				location: { lat: -1.2864, lng: 36.8172 },
-			},
-		},
-	}),
+	headers: {
+		"Content-Type": "application/json",
+		"X-Uber-Signature": webhookSignature,
+	},
+	body: webhookPayload,
 });
 console.log(webhookResponse.status, await webhookResponse.json());
 ```
 
-The test route responds with `200` and `{"status":"acknowledged"}`. This confirms only that the local handler accepted the test payload, not that a real delivery or order was updated.
+On success the route responds with `200` and `{"status":"forwarded"}`. It returns `401` for an invalid signature, `503` if the signing key or forwarding URL is missing, and `502` if the ecommerce callback fails. Do not treat a `200` from this service as proof that your app applied the status unless the configured callback also handles it idempotently.
 
 ## curl Examples
 
@@ -312,26 +337,23 @@ curl -i \
 
 The response is Uber's latest delivery object. Inspect its `status`, `tracking_url`, and courier/location fields when present. The API returns the raw Uber object, so field availability depends on the delivery state; courier location may not be available before assignment or the first location update. There is no separate endpoint to locate a courier by order number; first save the Uber delivery `id`.
 
-### 5. Test Webhook Acknowledgement Locally
+### 5. Test Signed Webhook Forwarding Locally
 
-This sends a **fake test event** to the local route. In production, configure Uber Direct to call your public `/webhook/uber` URL. The route currently logs and acknowledges the body only; it does not persist it, update the order, or verify a signature.
+In production, configure Uber Direct to call your public HTTPS `/webhook/uber` URL and subscribe to `event.delivery_status` and `event.courier_update`. The service verifies the HMAC signature and forwards the unchanged body and signature header to `DELIVERY_WEBHOOK_FORWARD_URL`. The ecommerce callback should persist the event and return `2xx` only when accepted.
+
+This sends a **fake test event**. Set `UBER_WEBHOOK_SIGNING_KEY` and point `DELIVERY_WEBHOOK_FORWARD_URL` at a test receiver first; otherwise the fake event could update a real order. The receiver must tolerate duplicate events.
 
 ```sh
+payload='{"delivery_id":"TEST-DELIVERY-ID","kind":"event.delivery_status","data":{"status":"pickup"}}'
+signature=$(printf %s "$payload" | openssl dgst -sha256 -hmac "$UBER_WEBHOOK_SIGNING_KEY" | awk '{print $2}')
+
 curl -i -X POST 'http://localhost:5000/webhook/uber' \
 	-H 'Content-Type: application/json' \
-	-d '{
-		"delivery_id":"DELIVERY_ID_FROM_UBER",
-		"kind":"event.delivery_status",
-		"data":{
-			"status":"pickup",
-			"courier_imminent":false,
-			"tracking_url":"https://example.test/track",
-			"courier":{"name":"Test Courier","location":{"lat":-1.2864,"lng":36.8172}}
-		}
-	}'
+	-H "X-Uber-Signature: $signature" \
+	--data-binary "$payload"
 ```
 
-The route returns `200` with `{"status":"acknowledged"}` and logs the event. Do not treat that response as confirmation that your ecommerce order was updated.
+Success returns `200` and `{"status":"forwarded"}`. An invalid signature returns `401`; missing webhook configuration returns `503`; and a failed callback returns `502` so Uber can retry.
 
 ## PowerShell Examples (Optional)
 
@@ -383,17 +405,15 @@ $delivery = Invoke-RestMethod -Uri "$api/deliveries" -Method Post `
 # Fetch current Uber status/location
 Invoke-RestMethod "$api/deliveries/$($delivery.id)"
 
-# Simulate a webhook locally; the service acknowledges and logs this event
+# Simulate a signed event only with a test forwarding destination configured
+$webhookPayload = '{"delivery_id":"TEST-DELIVERY-ID","kind":"event.delivery_status","data":{"status":"pickup"}}'
+$webhookKey = $env:UBER_WEBHOOK_SIGNING_KEY
+$hmac = [System.Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($webhookKey))
+$signature = [Convert]::ToHexString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($webhookPayload))).ToLowerInvariant()
+$hmac.Dispose()
 Invoke-RestMethod -Uri "$service/webhook/uber" -Method Post `
-	-ContentType 'application/json' -Body (@{
-		delivery_id = $delivery.id
-		kind = 'event.delivery_status'
-		data = @{
-			status = 'pickup'
-			courier_imminent = $false
-			courier = @{ name = 'Test Courier'; location = @{ lat = -1.2864; lng = 36.8172 } }
-		}
-	} | ConvertTo-Json -Depth 10)
+	-Headers @{ 'X-Uber-Signature' = $signature } `
+	-ContentType 'application/json' -Body $webhookPayload
 ```
 
 Persist the returned quote ID and delivery ID in your ecommerce order database. A quote may expire before booking; request another quote if Uber rejects it. Confirm manifest units and accepted values with your Uber Direct account before going live.
@@ -406,7 +426,7 @@ Persist the returned quote ID and delivery ID in your ecommerce order database. 
 | `POST /v1/customers/{customer_id}/delivery_quotes` | Request a quote; response includes Uber quote fields plus `quote_id` and `estimated_fee` |
 | `POST /v1/customers/{customer_id}/deliveries` | Book a delivery; response is Uber's delivery object |
 | `GET /v1/customers/{customer_id}/deliveries/{delivery_id}` | Fetch current Uber delivery details/status |
-| `POST /webhook/uber` | Acknowledge and log an Uber event; not persisted |
+| `POST /webhook/uber` | Verify Uber's signature and forward the raw event to the configured ecommerce callback; not persisted |
 
 Local input errors return `400`; unknown routes or a customer ID different from configured `UBER_CUSTOMER_ID` return `404`. Uber API errors are returned with Uber's HTTP status where available. OAuth failures currently surface as server errors with the OAuth error message.
 
@@ -417,5 +437,6 @@ Local input errors return `400`; unknown routes or a customer ID different from 
 - Test quote creation, delivery booking, and status lookup against sandbox using valid merchant-approved addresses and manifest data.
 - Confirm whether the configured Uber environment is sandbox or production before changing `UBER_API_BASE_URL`.
 - Put the service behind HTTPS and authenticate ecommerce-app requests; never expose client secrets to the browser/mobile app.
-- Verify webhook authenticity, persist events, and make event handling idempotent before relying on callbacks for order updates.
+- Create an HTTPS webhook in the Uber Direct dashboard, subscribe to delivery-status and courier-update events, and set its signing key in `UBER_WEBHOOK_SIGNING_KEY`.
+- Set `DELIVERY_WEBHOOK_FORWARD_URL` to an authenticated HTTPS ecommerce endpoint that persists events, applies updates by `delivery_id`, and handles duplicate deliveries idempotently.
 - Add durable order-to-delivery storage, retries, monitoring, and cancellation/update flows if the ecommerce workflow requires them.

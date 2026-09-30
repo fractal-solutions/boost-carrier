@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   createDelivery,
   createDeliveryQuote,
@@ -9,6 +10,7 @@ import {
 import { AddressValidationError, validateDropoffAddress } from "./address_validation";
 
 const customerId = process.env.UBER_CUSTOMER_ID || "PENDING_MERCHANT_ID_PLACEHOLDER";
+const webhookEnv = process.env as unknown as Record<string, string | undefined>;
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status });
@@ -27,6 +29,8 @@ class HttpError extends Error {
     super(message);
   }
 }
+
+class WebhookForwardError extends Error {}
 
 function validateCustomerId(requestedId: string): void {
   if (requestedId !== customerId) throw new HttpError(404, "Customer not found.");
@@ -63,17 +67,60 @@ function logWebhook(payload: Record<string, unknown>): void {
     delivery_id: payload.delivery_id,
     kind: payload.kind,
     status: data.status,
-    courier_imminent: data.courier_imminent,
-    courier: data.courier,
-    tracking_url: data.tracking_url,
     created: payload.created,
   }));
+}
+
+function validWebhookSignature(rawBody: string, signature: string | null, signingKey: string): boolean {
+  if (!signature || !/^[a-f\d]{64}$/i.test(signature)) return false;
+  const expected = createHmac("sha256", signingKey).update(rawBody, "utf8").digest();
+  const received = Buffer.from(signature, "hex");
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+async function forwardWebhook(rawBody: string, signature: string): Promise<void> {
+  const target = webhookEnv.DELIVERY_WEBHOOK_FORWARD_URL;
+  if (!target) throw new HttpError(503, "Webhook forwarding URL is not configured.");
+
+  let targetUrl: URL;
+  try {
+    targetUrl = new URL(target);
+    if (!(["http:", "https:"].includes(targetUrl.protocol)) || targetUrl.username || targetUrl.password) {
+      throw new Error("Unsupported webhook forwarding URL.");
+    }
+  } catch {
+    throw new HttpError(503, "Webhook forwarding URL is invalid.");
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(targetUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Uber-Signature": signature,
+      },
+      body: rawBody,
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    throw new WebhookForwardError("Configured webhook destination could not be reached.");
+  }
+
+  if (!response.ok) {
+    throw new WebhookForwardError(`Configured webhook destination returned HTTP ${response.status}.`);
+  }
 }
 
 function errorResponse(error: unknown): Response {
   if (error instanceof HttpError) return json({ error: error.message }, error.status);
   if (error instanceof AddressValidationError) {
     return json({ error: error.message }, error.status);
+  }
+  if (error instanceof WebhookForwardError) {
+    console.error("Uber webhook forwarding failed", error.message);
+    return json({ error: error.message }, 502);
   }
   if (error instanceof UberApiError) {
     return json({ error: error.message, details: error.details }, error.status);
@@ -96,9 +143,28 @@ export const server = Bun.serve({
       }
 
       if (url.pathname === "/webhook/uber" && request.method === "POST") {
-        const payload = await readJson(request);
+        const signingKey = webhookEnv.UBER_WEBHOOK_SIGNING_KEY;
+        if (!signingKey) return json({ error: "Uber webhook signing key is not configured." }, 503);
+
+        const signature = request.headers.get("x-uber-signature") ??
+          request.headers.get("x-postmates-signature");
+        const rawBody = await request.text();
+        if (!validWebhookSignature(rawBody, signature, signingKey)) {
+          return json({ error: "Invalid Uber webhook signature." }, 401);
+        }
+
+        let payload: unknown;
+        try {
+          payload = JSON.parse(rawBody);
+        } catch {
+          return json({ error: "Request body must contain valid JSON." }, 400);
+        }
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          return json({ error: "Request body must be a JSON object." }, 400);
+        }
+        await forwardWebhook(rawBody, signature!);
         logWebhook(payload);
-        return json({ status: "acknowledged" });
+        return json({ status: "forwarded" });
       }
 
       if (parts[0] !== "v1" || parts[1] !== "customers" || !parts[2]) {
