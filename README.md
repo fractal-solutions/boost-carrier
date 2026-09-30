@@ -99,36 +99,73 @@ bun test
 
 ## Interactive Demo (local end-to-end)
 
-Want to watch a full order work without a real Uber account? The demo runs this service against the `uber-delivery-mock-api` project, places a real delivery, and live-tails the order as status changes and signed webhooks flow through.
+Want to watch a full order work without a real Uber account? The demo runs this service against the [`uber-delivery-mock-api`](https://github.com/fractal-solutions/uber-delivery-mock-api) project, places a real delivery, and live-tails the order as status changes and signed webhooks flow through.
 
-Prerequisites:
+### What you need
 
-- Bun (already required above).
-- Python 3.10+ with the mock API's dependencies installed.
-- The `uber-delivery-mock-api` repository checked out as a sibling of this project (`../uber-delivery-mock-api`).
+- **Bun** — already required above.
+- **Python 3.10 or newer** — check with `python --version` (on Windows you can also try `py --version`).
+- **Git** — to clone the mock API.
 
-```powershell
-# once, in the mock API project
-pip install -r ..\uber-delivery-mock-api\requirements.txt
+### One-time setup
+
+The demo expects the mock API to sit **next to this project** in the same parent folder:
+
+```
+your-projects/
+├── boost-carrier/            <- this repo
+└── uber-delivery-mock-api/   <- cloned in step 1
 ```
 
-Then, from this project directory:
+From inside this project (`boost-carrier`), run these two commands once:
+
+```powershell
+# 1. Clone the mock Uber API as a sibling folder
+git clone https://github.com/fractal-solutions/uber-delivery-mock-api.git ..\uber-delivery-mock-api
+
+# 2. Install the mock API's Python dependencies
+python -m pip install -r ..\uber-delivery-mock-api\requirements.txt
+```
+
+If `python` is not recognised, use `py` instead, for example:
+
+```powershell
+py -m pip install -r ..\uber-delivery-mock-api\requirements.txt
+```
+
+### Run the demo
+
+Still inside `boost-carrier`:
 
 ```powershell
 bun demo
 ```
 
-The menu lets you place a live order end-to-end, request a quote only, look up a delivery by id, or send a signed test webhook. Placing an order walks through health, quote, and booking, then prints every status transition and every signed webhook the mock sends to `/webhook/uber` (which this service verifies and forwards to the demo's receiver).
+You will get a menu:
 
-To run one full order and exit (handy for a quick check):
+```
+1) Place a live order (end-to-end)
+2) Request a quote only
+3) Look up a delivery by id
+4) Send a signed test webhook
+0) Exit
+```
+
+Pick `1` to watch a complete order: health check, quote, booking, then every status change and every signed webhook the mock sends to `/webhook/uber` (which this service verifies and forwards to the demo's receiver).
+
+To run one full order and exit without the menu (handy for a quick check):
 
 ```powershell
 bun demo/order-demo.ts --auto
 ```
 
-The demo is self-contained: it starts its own mock API, this service, and a webhook receiver on ports `3200`, `5200`, and `9299`, using the mock's test credentials and with address validation disabled. It does not read or modify `.env`, so your real Uber credentials are untouched. Override the mock location or interpreter with the `MOCK_API_DIR` and `PYTHON` environment variables.
+### Good to know
 
-The same mock is used by the automated integration test (`test/integration.test.js`), which `bun test` runs alongside the unit tests.
+- The demo is self-contained: it starts its own mock API, this service, and a webhook receiver on ports `3200`, `5200`, and `9299`. You do not need to start anything else first.
+- It uses the mock's built-in test credentials and turns address validation off. It never reads or writes `.env`, so your real Uber credentials are untouched.
+- Cloned the mock somewhere else? Point the demo at it: `$env:MOCK_API_DIR = 'C:\path\to\uber-delivery-mock-api'; bun demo`.
+- `python` still not found? Set the interpreter explicitly: `$env:PYTHON = 'py'; bun demo`.
+- The same mock powers the automated integration test (`test/integration.test.js`), which `bun test` runs alongside the unit tests. If the mock API has not been cloned, those integration tests are skipped automatically instead of failing, so `bun test` still works on its own.
 
 ## Ecommerce Delivery Flow
 

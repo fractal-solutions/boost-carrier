@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 // End-to-end test: drives the real boost-carrier server against the
@@ -13,6 +14,10 @@ import path from "node:path";
 const boostDir = path.resolve(import.meta.dir, "..");
 const mockDir = process.env.MOCK_API_DIR || path.resolve(import.meta.dir, "..", "..", "uber-delivery-mock-api");
 const python = process.env.PYTHON || "python";
+
+// Skip the whole suite when the mock API has not been cloned next to this repo
+// (see the "Interactive Demo" section of the README for setup).
+const mockAvailable = existsSync(path.join(mockDir, "run.py"));
 
 const MOCK_PORT = 3100;
 const SERVICE_PORT = 5100;
@@ -72,6 +77,7 @@ async function waitFor(url, label, timeoutMs = 20000) {
 }
 
 beforeAll(async () => {
+  if (!mockAvailable) return;
   receiver = Bun.serve({
     port: RECEIVER_PORT,
     async fetch(request) {
@@ -141,7 +147,7 @@ afterAll(() => {
   receiver?.stop(true);
 });
 
-test("mock API mimics Uber's OAuth token endpoint", async () => {
+test.skipIf(!mockAvailable)("mock API mimics Uber's OAuth token endpoint", async () => {
   const response = await fetch(`${mockBase}/oauth/v2/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -158,7 +164,7 @@ test("mock API mimics Uber's OAuth token endpoint", async () => {
   expect(body.expires_in).toBeGreaterThan(0);
 });
 
-test("mock API rejects invalid OAuth credentials", async () => {
+test.skipIf(!mockAvailable)("mock API rejects invalid OAuth credentials", async () => {
   const response = await fetch(`${mockBase}/oauth/v2/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -167,13 +173,13 @@ test("mock API rejects invalid OAuth credentials", async () => {
   expect(response.status).toBe(401);
 });
 
-test("boost-carrier reports healthy", async () => {
+test.skipIf(!mockAvailable)("boost-carrier reports healthy", async () => {
   const response = await fetch(`${serviceBase}/health`);
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ status: "ok" });
 });
 
-test("boost-carrier rejects an unknown customer id", async () => {
+test.skipIf(!mockAvailable)("boost-carrier rejects an unknown customer id", async () => {
   const response = await fetch(`${serviceBase}/v1/customers/someone-else/delivery_quotes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -182,7 +188,7 @@ test("boost-carrier rejects an unknown customer id", async () => {
   expect(response.status).toBe(404);
 });
 
-test("full quote -> book -> status flow through the mock", async () => {
+test.skipIf(!mockAvailable)("full quote -> book -> status flow through the mock", async () => {
   const quoteResponse = await fetch(`${apiBase}/delivery_quotes`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -232,7 +238,7 @@ test("full quote -> book -> status flow through the mock", async () => {
   expect(status.status).toBeTruthy();
 });
 
-test("mock-signed webhook is verified and forwarded by boost-carrier", async () => {
+test.skipIf(!mockAvailable)("mock-signed webhook is verified and forwarded by boost-carrier", async () => {
   expect(deliveryId).toBeTruthy();
 
   const deadline = Date.now() + 15000;
