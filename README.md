@@ -95,7 +95,11 @@ The primary integration examples below are JavaScript and `curl`. The lifecycle 
 
 These examples use native `fetch` and work in Bun or modern Node.js. Run them on your ecommerce backend, not in browser code. Your ecommerce frontend should call your own authenticated application API; never expose Uber credentials or this unauthenticated service directly to browsers.
 
-The following shows one quote-to-book-to-status flow. Replace the customer ID and example addresses/contact details with your approved merchant and order data.
+Replace the customer ID and example addresses/contact details with your approved merchant and order data. These snippets share the setup below; run the relevant action block after setup. Run the quote before booking. **The booking example creates a real Uber delivery** in the configured Uber environment, so run it only after order confirmation and use sandbox while testing.
+
+### Shared Setup
+
+Use this helper and address pair with the action examples below. The request helper includes Uber's HTTP status and response body in any thrown error, including address-validation failures (`422`) and geocoder errors (`503`).
 
 ```js
 const service = "http://localhost:5000";
@@ -111,9 +115,6 @@ async function request(url, options) {
 	return body;
 }
 
-const health = await request(`${service}/health`);
-console.log("Service:", health.status);
-
 const pickup = {
 	street_address: ["123 Store Road"],
 	city: "Nairobi",
@@ -124,7 +125,22 @@ const dropoff = {
 	city: "Nairobi",
 	country: "KE",
 };
+```
 
+### 1. Check Service Health
+
+This checks that the Bun process is responding. It does not check Uber credentials or delivery coverage.
+
+```js
+const health = await request(`${service}/health`);
+console.log("Service:", health.status);
+```
+
+### 2. Request a Delivery Quote
+
+Request a quote before showing Uber delivery as an available checkout option. When address validation is enabled, the server checks the drop-off against Photon before it contacts Uber.
+
+```js
 const quote = await request(`${api}/delivery_quotes`, {
 	method: "POST",
 	headers: { "Content-Type": "application/json" },
@@ -136,7 +152,15 @@ const quote = await request(`${api}/delivery_quotes`, {
 	}),
 });
 console.log("Quote:", quote.quote_id, "fee:", quote.estimated_fee);
+```
 
+The response is `201` and includes `quote_id` and `estimated_fee`. A `422` means Photon did not find a matching street or house number; a `503` means the geocoder was unavailable. Do not book unless the request succeeds and the customer confirms the order.
+
+### 3. Create a Delivery
+
+This calls Uber to book a courier. Use the same address values from the quote, and save the returned delivery ID and tracking URL in your order database. Reuse the same `idempotency_key` only when retrying the same order.
+
+```js
 const delivery = await request(`${api}/deliveries`, {
 	method: "POST",
 	headers: { "Content-Type": "application/json" },
@@ -165,16 +189,31 @@ const delivery = await request(`${api}/deliveries`, {
 	}),
 });
 
-// Persist delivery.id and delivery.tracking_url against your ecommerce order.
 console.log("Delivery:", delivery.id, delivery.tracking_url);
-
-const current = await request(
-	`${api}/deliveries/${encodeURIComponent(delivery.id)}`,
-);
-console.log("Current status/location:", current);
 ```
 
-Uber sends webhooks to your deployed service; your ecommerce app does not need to send the real event. To simulate one locally from JavaScript and see the server log it:
+### 4. Check Delivery Status and Courier Location
+
+Use the delivery ID returned by the booking call, or replace `delivery.id` with an ID you previously saved. This returns the latest Uber object; courier/location fields may be absent until Uber assigns a courier and reports a location.
+
+```js
+const deliveryId = delivery.id;
+const current = await request(
+	`${api}/deliveries/${encodeURIComponent(deliveryId)}`,
+);
+
+console.log("Full Uber response:", current);
+console.log("Status:", current.status ?? "Not present in response");
+console.log("Tracking URL:", current.tracking_url ?? "Not present in response");
+console.log("Courier:", current.courier ?? "Not assigned or not present yet");
+console.log("Courier location:", current.courier?.location ?? "Not available yet");
+```
+
+The service does not store status history. Call this endpoint again when you need a fresh snapshot; the tracking URL can also be shown to the customer.
+
+### 5. Test Webhook Acknowledgement
+
+For production, configure Uber Direct to POST real events to `https://YOUR_HOST/webhook/uber`; your ecommerce app does not send those events. This local example sends a **fake test event**. The route only logs and acknowledges it; it does not update an order database, verify Uber's signature, or forward the event elsewhere.
 
 ```js
 const webhookResponse = await fetch("http://localhost:5000/webhook/uber", {
@@ -197,17 +236,21 @@ const webhookResponse = await fetch("http://localhost:5000/webhook/uber", {
 console.log(webhookResponse.status, await webhookResponse.json());
 ```
 
+The test route responds with `200` and `{"status":"acknowledged"}`. This confirms only that the local handler accepted the test payload, not that a real delivery or order was updated.
+
 ## curl Examples
 
-These examples use POSIX shell quoting and `localhost:5000`. Substitute the actual customer ID after merchant approval. The quote and delivery examples use the same address pair; booking should use the addresses and quote returned for the order.
+These examples use POSIX shell quoting and `localhost:5000`. Substitute the actual customer ID after merchant approval. Keep the quote ID and delivery ID returned by Uber; this API does not store them for you.
 
-Check health:
+### 1. Check Service Health
 
 ```sh
 curl -i http://localhost:5000/health
 ```
 
-Request a quote:
+Expect `200` and `{"status":"ok"}` if the Bun process is responding. This checks process health only; it does not verify Uber credentials.
+
+### 2. Request a Delivery Quote
 
 ```sh
 curl -i -X POST \
@@ -221,7 +264,11 @@ curl -i -X POST \
 	}'
 ```
 
-Copy the returned `quote_id` into the booking request:
+On success, the response is `201` and includes Uber's quote fields plus `quote_id` and `estimated_fee`. Address validation is on by default: `422` means no matching street/house number was found; `503` means Photon could not be reached. Do not show the delivery option unless a quote succeeds. To skip map validation, set `ADDRESS_VALIDATION_ENABLED=false` in the service environment and restart it.
+
+### 3. Book the Delivery
+
+After the customer confirms the order, copy the quote's `quote_id` below. Use the **same pickup and drop-off addresses** that were used for that quote.
 
 ```sh
 curl -i -X POST \
@@ -241,18 +288,33 @@ curl -i -X POST \
 		"manifest_total_value_cents": 250000,
 		"deliverable_action": "deliverable_action_meet_at_door",
 		"undeliverable_action": "return",
-		"manifest_items": [{"name":"Example product","quantity":1,"size":"medium","price":250000,"must_be_upright":false,"weight":500}]
+		"manifest_items": [{
+			"name": "Example product",
+			"quantity": 1,
+			"size": "medium",
+			"price": 250000,
+			"must_be_upright": false,
+			"weight": 500
+		}]
 	}'
 ```
 
-Fetch latest delivery details, replacing the ID with the booking response's `id`:
+Expect `201` with Uber's delivery object. Save its `id` against your order. Use the same `idempotency_key` when retrying the same booking request; use a different key for a different order.
+
+### 4. Check Delivery Status and Courier Location
+
+Replace the ID with the `id` returned when booking:
 
 ```sh
 curl -i \
 	'http://localhost:5000/v1/customers/PENDING_MERCHANT_ID_PLACEHOLDER/deliveries/DELIVERY_ID_FROM_BOOKING'
 ```
 
-Simulate an Uber webhook event:
+The response is Uber's latest delivery object. Inspect its `status`, `tracking_url`, and courier/location fields when present. The API returns the raw Uber object, so field availability depends on the delivery state; courier location may not be available before assignment or the first location update. There is no separate endpoint to locate a courier by order number; first save the Uber delivery `id`.
+
+### 5. Test Webhook Acknowledgement Locally
+
+This sends a **fake test event** to the local route. In production, configure Uber Direct to call your public `/webhook/uber` URL. The route currently logs and acknowledges the body only; it does not persist it, update the order, or verify a signature.
 
 ```sh
 curl -i -X POST 'http://localhost:5000/webhook/uber' \
@@ -268,6 +330,8 @@ curl -i -X POST 'http://localhost:5000/webhook/uber' \
 		}
 	}'
 ```
+
+The route returns `200` with `{"status":"acknowledged"}` and logs the event. Do not treat that response as confirmation that your ecommerce order was updated.
 
 ## PowerShell Examples (Optional)
 
